@@ -1,0 +1,5 @@
+reality-tui
+*.csv
+*.html
+*.zip
+.DS_Store
