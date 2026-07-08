@@ -1,3 +1,7 @@
+[**English**](README_EN.md) | [**中文**](README.md)
+
+---
+
 # RealiKit
 
 A terminal UI tool for scanning and verifying Reality protocol target domains.

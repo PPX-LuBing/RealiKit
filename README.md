@@ -1,3 +1,7 @@
+[**English**](README_EN.md) | [**中文**](README.md)
+
+---
+
 # RealiKit
 
 一键扫描 + 深度验证 Reality 协议可用域名的终端 UI 工具。
