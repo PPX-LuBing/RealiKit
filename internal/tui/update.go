@@ -94,9 +94,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.view != inputView {
-				if m.phase == phaseTLSScanning || m.phase == phaseVerifying {
-					close(m.cancelScan)
-				}
+				if m.cancelFn != nil { m.cancelFn() }
 				m.view = inputView; m.phase = phaseIdle
 				return m, nil
 			}
@@ -197,7 +195,7 @@ func (m *Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			EnableIPv6: m.enableIPv6, Verbose: m.verbose,
 		}
 		SaveConfig(cfg)
-		m.logCh <- LogEntry{text: "✓ 配置已保存", isSuccess: true}
+		select { case m.logCh <- LogEntry{text: "✓ 配置已保存", isSuccess: true}: default: }
 		return m, nil
 	case key.Matches(msg, m.keys.FavOnly):
 		m.showFavOnly = !m.showFavOnly
@@ -231,54 +229,62 @@ func (m *Model) startScan() (tea.Model, tea.Cmd) {
 	m.view = scanningView; m.phase = phaseTLSScanning
 	m.scanResults = make([]ScanResultItem, 0)
 	m.feasibleCount = 0; m.logs = make([]LogEntry, 0)
-	m.startTime = time.Now(); m.cancelScan = make(chan struct{})
+	m.startTime = time.Now()
+	m.scanGen++
+	gen := m.scanGen
+
+	cancel := make(chan struct{})
+	m.cancelScan = cancel
+	m.cancelFn = func() {
+		select { case <-cancel: default: close(cancel) }
+	}
+
 	m.scanResultsCh = make(chan ScanResultItem, 1000)
 	m.verifyResultsCh = make(chan ScanResultItem, 1000)
 	m.logCh = make(chan LogEntry, 1000)
 	m.scanDoneCh = make(chan struct{})
 	m.progressCh = make(chan ScanProgress, 100)
 
-	go m.runScan(port, threads, timeout)
-	return m, tea.Batch(m.listenForResults(), m.listenForLogs(), m.listenForProgress())
+	go m.runScan(port, threads, timeout, gen)
+	return m, tea.Batch(m.listenForResults(gen), m.listenForLogs(gen), m.listenForProgress(gen))
 }
 
-func (m *Model) runScan(port, threads, timeout int) {
+func (m *Model) runScan(port, threads, timeout int, gen int) {
 	var hosts <-chan scanner.Host
 	target := m.targetInput.Value()
 	totalEst := 0
+
+	if !m.checkGen(gen) { return }
 
 	switch m.inputMode {
 	case modeAddr:
 		if strings.HasPrefix(target, "http") {
 			domains, err := scanner.ExtractDomainsFromURL(target)
-			if err != nil { m.logCh <- LogEntry{text: fmt.Sprintf("URL失败: %v", err), isErr: true}; m.scanDoneCh <- struct{}{}; return }
+			if err != nil { m.safeLog(gen, fmt.Sprintf("URL失败: %v", err), true); return }
 			hosts = scanner.ParseTargets(strings.NewReader(strings.Join(domains, "\n")), m.enableIPv6)
 			totalEst = len(domains)
-			m.logCh <- LogEntry{text: fmt.Sprintf("URL解析到 %d 个域名", totalEst), isSuccess: true}
+			m.safeLog(gen, fmt.Sprintf("URL解析到 %d 个域名", totalEst), false)
 		} else if strings.Contains(target, "/") {
 			totalEst = scanner.CIDRSize(target)
 			hosts = scanner.ExpandAddr(target, m.enableIPv6)
-			m.logCh <- LogEntry{text: fmt.Sprintf("CIDR %s (共%d个IP)", target, totalEst), isSuccess: true}
+			m.safeLog(gen, fmt.Sprintf("CIDR %s (共%d个IP)", target, totalEst), false)
 		} else {
 			hosts = scanner.ExpandAddr(target, m.enableIPv6); totalEst = 1
-			m.logCh <- LogEntry{text: fmt.Sprintf("扫描 %s", target), isSuccess: true}
+			m.safeLog(gen, fmt.Sprintf("扫描 %s", target), false)
 		}
 	case modeFile:
-		data, _ := os.ReadFile(m.filePath)
-		totalEst = len(strings.Split(strings.TrimSpace(string(data)), "\n"))
-		f, _ := os.Open(m.filePath)
-		if f != nil {
-			hosts = scanner.ParseTargets(f, m.enableIPv6); f.Close()
-			m.logCh <- LogEntry{text: fmt.Sprintf("文件 %s (%d行)", m.filePath, totalEst), isSuccess: true}
-		} else {
-			m.scanDoneCh <- struct{}{}; return
-		}
+		f, err := os.Open(m.filePath)
+		if err != nil { m.safeLog(gen, fmt.Sprintf("打开文件失败: %v", err), true); return }
+		hosts = scanner.ParseTargets(f, m.enableIPv6)
+		f.Close()
+		totalEst = 0
+		m.safeLog(gen, fmt.Sprintf("文件: %s", m.filePath), false)
 	case modeURL:
 		domains, err := scanner.ExtractDomainsFromURL(m.urlInput.Value())
-		if err != nil { m.logCh <- LogEntry{text: fmt.Sprintf("URL失败: %v", err), isErr: true}; m.scanDoneCh <- struct{}{}; return }
+		if err != nil { m.safeLog(gen, fmt.Sprintf("URL失败: %v", err), true); return }
 		hosts = scanner.ParseTargets(strings.NewReader(strings.Join(domains, "\n")), m.enableIPv6)
 		totalEst = len(domains)
-		m.logCh <- LogEntry{text: fmt.Sprintf("URL解析到 %d 个域名", totalEst), isSuccess: true}
+		m.safeLog(gen, fmt.Sprintf("URL解析到 %d 个域名", totalEst), false)
 	}
 
 	maxTargets := 0
@@ -298,25 +304,31 @@ func (m *Model) runScan(port, threads, timeout int) {
 loop:
 	for {
 		select {
+		case <-m.cancelScan:
+			return
+		default:
+		}
+
+		select {
 		case result, ok := <-resultCh:
 			if !ok { break loop }
 			count++
 			item := ScanResultItem{ScanResult: result}
-			m.scanResultsCh <- item
+			m.safeResult(gen, item)
 			if result.Feasible {
-				m.logCh <- LogEntry{text: fmt.Sprintf("✓ %s tls=%s h2=%s domain=%s", result.IP, result.TLSVersion, result.ALPN, result.CertDomain), isSuccess: true}
+				m.safeLog(gen, fmt.Sprintf("✓ %s tls=%s h2=%s", result.IP, result.TLSVersion, result.CertDomain), false)
 			} else if m.verbose {
-				m.logCh <- LogEntry{text: fmt.Sprintf("✗ %s 不可用", result.IP), isErr: true}
+				m.safeLog(gen, fmt.Sprintf("✗ %s 不可用", result.IP), true)
 			}
 			total := totalEst
 			if total <= 0 { total = count + 1 }
-			m.progressCh <- ScanProgress{count, total}
+			m.safeProgress(gen, count, total)
 		case <-m.cancelScan:
-			m.logCh <- LogEntry{text: "扫描已取消", isErr: true}; return
+			return
 		}
 	}
-	m.logCh <- LogEntry{text: fmt.Sprintf("TLS扫描完成: %d目标 %d可行", count, m.feasibleCount), isSuccess: true}
-	m.scanDoneCh <- struct{}{}
+	m.safeLog(gen, fmt.Sprintf("TLS扫描完成: %d目标 %d可行", count, m.feasibleCount), false)
+	m.safeDone(gen)
 }
 
 func (m *Model) verifyDomainItem(item ScanResultItem) {
@@ -324,8 +336,14 @@ func (m *Model) verifyDomainItem(item ScanResultItem) {
 	c := checker.NewChecker(checker.CheckConfig{Timeout: timeout})
 	r := c.Check(item.CertDomain)
 	item.checkResult = r
-	m.verifyResultsCh <- item
-	m.logCh <- LogEntry{text: fmt.Sprintf("✓ %s %s", item.CertDomain, r.Recommendation), isSuccess: true}
+	select {
+	case m.verifyResultsCh <- item:
+	default:
+	}
+	select {
+	case m.logCh <- LogEntry{text: fmt.Sprintf("✓ %s %s", item.CertDomain, r.Recommendation), isSuccess: true}:
+	default:
+	}
 }
 
 func (m *Model) updateResults(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -506,24 +524,74 @@ func (m *Model) exportHTML() {
 	m.logCh <- LogEntry{text: fmt.Sprintf("HTML报告已导出: %s", fname), isSuccess: true}
 }
 
-func (m *Model) listenForResults() tea.Cmd {
+func (m *Model) checkGen(gen int) bool {
+	return gen == m.scanGen
+}
+
+func (m *Model) safeLog(gen int, text string, isErr bool) {
+	if !m.checkGen(gen) { return }
+	select {
+	case m.logCh <- LogEntry{text: text, isErr: isErr, isSuccess: !isErr}:
+	default:
+	}
+}
+
+func (m *Model) safeResult(gen int, item ScanResultItem) {
+	if !m.checkGen(gen) { return }
+	select {
+	case m.scanResultsCh <- item:
+	default:
+	}
+}
+
+func (m *Model) safeProgress(gen int, scanned, total int) {
+	if !m.checkGen(gen) { return }
+	select {
+	case m.progressCh <- ScanProgress{scanned, total}:
+	default:
+	}
+}
+
+func (m *Model) safeDone(gen int) {
+	if !m.checkGen(gen) { return }
+	select {
+	case m.scanDoneCh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Model) listenForResults(gen int) tea.Cmd {
 	return func() tea.Msg {
 		for {
+			if !m.checkGen(gen) { return nil }
 			select {
 			case r := <-m.scanResultsCh: return scanResultMsg(r)
 			case r := <-m.verifyResultsCh: return verifyResultMsg(r)
 			case <-m.scanDoneCh: return scanDoneMsg{}
+			case <-m.cancelScan: return nil
 			}
 		}
 	}
 }
 
-func (m *Model) listenForLogs() tea.Cmd {
-	return func() tea.Msg { return logMsg(<-m.logCh) }
+func (m *Model) listenForLogs(gen int) tea.Cmd {
+	return func() tea.Msg {
+		if !m.checkGen(gen) { return nil }
+		select {
+		case entry := <-m.logCh: return logMsg(entry)
+		case <-m.cancelScan: return nil
+		}
+	}
 }
 
-func (m *Model) listenForProgress() tea.Cmd {
-	return func() tea.Msg { return scanProgressMsg(<-m.progressCh) }
+func (m *Model) listenForProgress(gen int) tea.Cmd {
+	return func() tea.Msg {
+		if !m.checkGen(gen) { return nil }
+		select {
+		case p := <-m.progressCh: return scanProgressMsg(p)
+		case <-m.cancelScan: return nil
+		}
+	}
 }
 
 func (m *Model) eta() string {

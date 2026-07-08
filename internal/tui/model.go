@@ -120,6 +120,7 @@ type Model struct {
 	scanDoneCh     chan struct{}
 	progressCh     chan ScanProgress
 	cancelScan     chan struct{}
+	cancelFn       func()
 
 	err           error
 	feasibleCount int
@@ -131,6 +132,7 @@ type Model struct {
 	searchInput       textinput.Model
 	searching         bool
 	confirmQuit       bool
+	scanGen           int
 
 	// manual verify
 	verifyInput textinput.Model

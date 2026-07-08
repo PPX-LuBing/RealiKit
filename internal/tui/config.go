@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -45,29 +46,12 @@ func SaveConfig(cfg *SavedConfig) {
 }
 
 func generateX25519Keys() (string, string, error) {
-	priv := make([]byte, 32)
-	_, err := rand.Read(priv)
+	curve := ecdh.X25519()
+	priv, err := curve.GenerateKey(rand.Reader)
 	if err != nil {
-		return "", "", fmt.Errorf("random failed: %w", err)
+		return "", "", fmt.Errorf("key generation failed: %w", err)
 	}
-	priv[0] &= 248
-	priv[31] &= 127
-	priv[31] |= 64
-
-	pub, err := curve25519Pub(priv)
-	if err != nil {
-		return "", "", err
-	}
-	return fmt.Sprintf("%x", priv), fmt.Sprintf("%x", pub), nil
-}
-
-func curve25519Pub(priv []byte) ([]byte, error) {
-	pub := make([]byte, 32)
-	pub[0] = 9
-	for i := 1; i < 32; i++ {
-		pub[i] = 0
-	}
-	return pub, nil
+	return fmt.Sprintf("%x", priv.Bytes()), fmt.Sprintf("%x", priv.PublicKey().Bytes()), nil
 }
 
 func GenerateRealityConfig(serverName string) string {

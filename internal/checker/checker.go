@@ -46,6 +46,7 @@ type CheckResult struct {
 }
 
 type Checker struct {
+	config       CheckConfig
 	httpClient   *http.Client
 	cdnDetector  *CDNDetector
 	blockDetector *BlockDetector
@@ -58,6 +59,7 @@ func NewChecker(config CheckConfig) *Checker {
 		DisableKeepAlives: true,
 	}
 	return &Checker{
+		config: config,
 		httpClient: &http.Client{
 			Timeout:   time.Duration(config.Timeout) * time.Second,
 			Transport: tr,
@@ -147,14 +149,16 @@ func (c *Checker) checkTLS(domain string) *tlsCheckResult {
 		return nil
 	}
 	ip := ips[0].String()
-	addr := net.JoinHostPort(ip, "443")
+	port := "443"
+	if c.config.Port > 0 { port = fmt.Sprint(c.config.Port) }
+	addr := net.JoinHostPort(ip, port)
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	conn, err := net.DialTimeout("tcp", addr, time.Duration(c.config.Timeout)*time.Second)
 	if err != nil {
 		return nil
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	conn.SetDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
 	tlsCfg := &tls.Config{
 		InsecureSkipVerify: true,
 		ServerName:         domain,
@@ -177,7 +181,7 @@ func (c *Checker) checkTLS(domain string) *tlsCheckResult {
 	if len(state.PeerCertificates) > 0 {
 		cert := state.PeerCertificates[0]
 		r.certDomain = cert.Subject.CommonName
-		r.certIssuer = fmt.Sprintf("%s", cert.Issuer)
+		r.certIssuer = strings.Join(cert.Issuer.Organization, " | ")
 		r.certDaysLeft = int(cert.NotAfter.Sub(time.Now()).Hours() / 24)
 		r.certValid = time.Now().Before(cert.NotAfter) && time.Now().After(cert.NotBefore)
 		for _, name := range cert.DNSNames {

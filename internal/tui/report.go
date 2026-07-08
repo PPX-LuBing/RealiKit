@@ -68,7 +68,7 @@ h1{color:#7c3aed;border-bottom:2px solid #7c3aed;padding-bottom:10px}
 .card{background:#16213e;padding:15px 20px;border-radius:10px;flex:1;text-align:center}
 .card h3{margin:0;color:#7c3aed}
 .card .num{font-size:28px;font-weight:bold;margin:5px 0}
-table{width:100` + "%" + `;border-collapse:collapse;margin:20px 0}
+table{width:100%;border-collapse:collapse;margin:20px 0}
 th,td{padding:8px 12px;text-align:left;border-bottom:1px solid #333}
 th{background:#7c3aed;color:#fff}
 tr:hover{background:#16213e}
